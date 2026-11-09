@@ -1,0 +1,33 @@
+name: cfpb
+version: "1.0.0"
+config-version: 2
+profile: cfpb
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  cfpb:
+    staging:
+      +schema: staging
+      +materialized: view        # cheap, always reflects raw
+    marts:
+      +schema: marts
+      +materialized: table
+
+seeds:
+  cfpb:
+    +schema: reference
+    us_states:
+      +column_types:
+        state_code: varchar
+        state_name: varchar
+        census_region: varchar
+
+tests:
+  +store_failures: true          # failing rows saved to a table for debugging
+  +schema: test_failures

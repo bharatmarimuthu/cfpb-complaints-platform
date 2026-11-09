@@ -1,0 +1,9 @@
+# dbt connection settings. Uses the same DuckDB file the ingestion job writes.
+# Override the path with the CFPB_DB_PATH env var (relative to this folder).
+cfpb:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('CFPB_DB_PATH', '../data/warehouse.duckdb') }}"
+      threads: 4
