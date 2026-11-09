@@ -45,8 +45,10 @@ select
     {{ clean_text('company') }}                                      as company_name,
     {{ clean_text('company_response') }}                             as company_response,
     {{ clean_text('company_public_response') }}                      as company_public_response,
-    upper({{ clean_text('state') }})                                 as state_code,
-    {{ clean_text('zip_code') }}                                     as zip_code,
+    case upper({{ clean_text('state') }})
+        when 'UNITED STATES MINOR OUTLYING ISLANDS' then 'UM'  -- CFPB sends the full name for this one
+        else upper({{ clean_text('state') }})
+    end                                                              as state_code,    {{ clean_text('zip_code') }}                                     as zip_code,
     coalesce({{ clean_text('zip_code') }} like '%XX', false)         as is_zip_masked,
     {{ clean_text('tags') }}                                         as tags,
     {{ clean_text('submitted_via') }}                                as submitted_via,
