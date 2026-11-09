@@ -1,0 +1,60 @@
+version: 2
+
+models:
+  - name: stg_complaints
+    description: Typed and cleaned complaints. Placeholder strings ('', 'None', 'N/A') become NULL.
+    columns:
+      - name: complaint_id
+        data_tests: [unique, not_null]
+      - name: date_received
+        data_tests: [not_null, not_in_future]
+      - name: product
+        data_tests: [not_null]
+      - name: company_name
+        data_tests: [not_null]
+      - name: state_code
+        description: Two-letter code, upper-cased. Unrecognized codes are flagged, not dropped.
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('us_states')
+                field: state_code
+              config: {severity: warn}
+      - name: company_response
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["Closed with explanation", "Closed with non-monetary relief",
+                         "Closed with monetary relief", "In progress", "Untimely response",
+                         "Closed", "Closed with relief", "Closed without relief"]
+              config: {severity: warn}   # a new value from CFPB should alert, not break the build
+      - name: submitted_via
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["Web", "Referral", "Phone", "Postal mail", "Fax", "Email", "Web Referral"]
+              config: {severity: warn}
+      - name: is_timely
+        data_tests:
+          - not_null:
+              config: {severity: warn}
+
+unit_tests:
+  - name: test_stg_complaints_cleans_placeholders_and_types
+    description: Placeholder strings become NULL, states are upper-cased, dates and booleans are typed.
+    model: stg_complaints
+    given:
+      - input: source('raw', 'complaints')
+        format: sql
+        rows: |
+          select
+            '1' as complaint_id, date '2026-10-03' as date_received, 'h1' as record_hash,
+            '{"date_received":"2026-10-03T12:00:00-05:00","date_sent_to_company":"2026-10-05T12:00:00-05:00","product":"Credit card","sub_product":"None","issue":"Fees or interest","sub_issue":"","company":"  EXAMPLE BANK ","company_response":"In progress","state":" ca","zip_code":"950XX","timely":"No","consumer_disputed":"N/A","complaint_what_happened":"","submitted_via":"Web"}'::json as raw_json,
+            timestamp '2026-10-04 00:00:00' as first_ingested_at,
+            timestamp '2026-10-04 00:00:00' as last_updated_at
+    expect:
+      rows:
+        - {complaint_id: "1", date_received: 2026-10-03, date_sent_to_company: 2026-10-05,
+           product: "Credit card", sub_product: null, sub_issue: null,
+           company_name: "EXAMPLE BANK", state_code: "CA", zip_code: "950XX",
+           is_zip_masked: true, is_timely: false, consumer_disputed: null, narrative: null}
