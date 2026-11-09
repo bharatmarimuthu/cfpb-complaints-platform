@@ -1,0 +1,111 @@
+version: 2
+
+models:
+  - name: fct_complaints
+    description: One row per complaint. Grain = complaint_id. Joins to every dimension by key.
+    config:
+      contract: {enforced: true}   # build fails if a column's name or type drifts
+      meta: {owner: data-platform, contains_pii: false}
+    columns:
+      - name: complaint_id
+        data_type: varchar
+        constraints: [{type: not_null}, {type: primary_key}]
+        data_tests: [unique, not_null]
+      - name: date_received_key
+        data_type: integer
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_date'), field: date_key}
+      - name: date_sent_key
+        data_type: integer
+        data_tests:
+          - relationships:
+              arguments: {to: ref('dim_date'), field: date_key}
+      - name: company_key
+        data_type: varchar
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_company'), field: company_key}
+      - name: product_key
+        data_type: varchar
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_product'), field: product_key}
+      - name: issue_key
+        data_type: varchar
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_issue'), field: issue_key}
+      - name: state_code
+        data_type: varchar
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_state'), field: state_code}
+      - {name: zip_code, data_type: varchar}
+      - {name: is_zip_masked, data_type: boolean}
+      - {name: submitted_via, data_type: varchar}
+      - {name: company_response, data_type: varchar}
+      - {name: company_public_response, data_type: varchar}
+      - {name: tags, data_type: varchar}
+      - {name: consumer_consent_provided, data_type: varchar}
+      - {name: is_timely, data_type: boolean}
+      - name: days_to_company
+        data_type: bigint
+        description: Days between CFPB receiving the complaint and forwarding it to the company.
+      - {name: has_narrative, data_type: boolean}
+      - {name: is_closed, data_type: boolean}
+      - {name: has_monetary_relief, data_type: boolean}
+      - {name: last_updated_at, data_type: timestamp}
+
+  - name: complaint_narratives
+    description: >
+      Consumer-written narratives (unstructured text). Split from the fact table so access
+      can be restricted. CFPB scrubs PII before publishing, but free text can still leak it.
+    config:
+      meta: {owner: data-platform, contains_pii: possible, access_tier: restricted}
+    columns:
+      - name: complaint_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments: {to: ref('fct_complaints'), field: complaint_id}
+      - name: narrative
+        data_tests: [not_null]
+
+  - name: dim_company
+    columns:
+      - name: company_key
+        data_tests: [unique, not_null]
+      - name: company_name
+        data_tests: [not_null]
+  - name: dim_product
+    columns:
+      - name: product_key
+        data_tests: [unique, not_null]
+  - name: dim_issue
+    columns:
+      - name: issue_key
+        data_tests: [unique, not_null]
+  - name: dim_state
+    columns:
+      - name: state_code
+        data_tests: [unique, not_null]
+  - name: dim_date
+    columns:
+      - name: date_key
+        data_tests: [unique, not_null]
+
+  - name: mart_company_monthly
+    description: Complaints per company per month with response-quality rates.
+    data_tests:
+      - unique_combination_of_columns:
+          arguments: {columns: [month_start, company_key]}
+    columns:
+      - name: complaints
+        data_tests: [not_null]
