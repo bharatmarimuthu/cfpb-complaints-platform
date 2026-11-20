@@ -2,7 +2,9 @@
 
 An end-to-end data platform built on the [CFPB Consumer Complaint Database](https://www.consumerfinance.gov/data-research/consumer-complaints/), a public dataset of complaints about U.S. banks and financial companies. It is updated daily and has both structured fields and free-text narratives.
 
-**Stack:** Python · DuckDB · dbt · Dagster · GitHub Actions · (LLM enrichment, Streamlit dashboard, coming in later phases)
+**Stack:** Python · DuckDB · dbt · pytest
+
+**Status:** Phases 1–2 are complete and tested (15 pytest tests; 45 dbt data tests + 1 unit test). The project is paused there; phases 3–8 are possible extensions, not in progress.
 
 ## Roadmap
 
@@ -10,12 +12,12 @@ An end-to-end data platform built on the [CFPB Consumer Complaint Database](http
 |---|---|---|
 | 1 | Incremental, idempotent ingestion from the CFPB API into a raw layer | ✅ |
 | 2 | dbt models: staging → star schema, with data tests | ✅ |
-| 3 | Dagster orchestration: schedules, retries, lineage | ⬜ |
-| 4 | Data quality gates that block bad loads | ⬜ |
-| 5 | CI/CD with GitHub Actions | ⬜ |
-| 6 | LLM narrative classification + PII flagging, evaluated against labeled data | ⬜ |
-| 7 | Complaint-volume anomaly detection | ⬜ |
-| 8 | Dashboard (pipeline health + complaint trends) | ⬜ |
+| 3 | Dagster orchestration: schedules, retries, lineage | Not started |
+| 4 | Data quality gates that block bad loads | Not started |
+| 5 | CI/CD with GitHub Actions | Not started |
+| 6 | LLM narrative classification + PII flagging, evaluated against labeled data | Not started |
+| 7 | Complaint-volume anomaly detection | Not started |
+| 8 | Dashboard (pipeline health + complaint trends) | Not started |
 
 ## Quickstart
 
