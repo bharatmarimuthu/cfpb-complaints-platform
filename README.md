@@ -10,7 +10,7 @@ An end-to-end data platform built on the [CFPB Consumer Complaint Database](http
 |---|---|---|
 | 1 | Incremental, idempotent ingestion from the CFPB API into a raw layer | ✅ |
 | 2 | dbt models: staging → star schema, with data tests | ✅ |
-| 3 | Dagster orchestration: schedules, retries, lineage | ⬜ |
+| 3 | Dagster orchestration: schedules, retries, lineage | ✅ |
 | 4 | Data quality gates that block bad loads | ⬜ |
 | 5 | CI/CD with GitHub Actions | ⬜ |
 | 6 | LLM narrative classification + PII flagging, evaluated against labeled data | ⬜ |
@@ -24,7 +24,7 @@ python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
 
-pytest                              # 15 offline tests
+pytest                              # 22 offline tests (incl. an end-to-end Dagster run)
 
 # Load one week to try it out
 python -m cfpb_platform.ingest --start 2026-10-01 --end 2026-10-07
@@ -37,6 +37,11 @@ cd transform
 dbt build                           # seeds, models, 45 data tests, 1 unit test
 dbt source freshness                # alerts if ingestion has stalled
 dbt docs generate && dbt docs serve # browsable docs + lineage graph
+cd ..
+
+# Or run the whole pipeline through Dagster (from the repo root)
+mkdir -p .dagster && export DAGSTER_HOME="$PWD/.dagster"   # keeps run history between restarts
+dagster dev                         # UI at http://localhost:3000
 ```
 
 No network? `python -m cfpb_platform.sample_data --rows 5000` loads **synthetic** complaints (with realistic mess) so you can run dbt offline.
@@ -120,3 +125,45 @@ FROM marts.mart_company_monthly
 ORDER BY change DESC NULLS LAST
 LIMIT 10;
 ```
+
+## Phase 3: Orchestration (Dagster)
+
+```
+raw/complaints ──▶ staging/stg_complaints ──▶ marts/* (9 dbt assets, 41 asset checks)
+ (Python asset)          ▲
+reference/us_states ─────┘ (seed)
+
+job: daily_refresh (all assets)  ·  schedule: 06:00 America/New_York
+```
+
+![Dagster asset graph: ingestion feeds the dbt staging, dimension, fact, and mart models](docs/dagster-asset-graph.png)
+
+**First real run (2026-11-19):** `daily_refresh` pulled 711,230 complaints across 33 days (Oct 18 to Nov 19) in 26 minutes, with 0 truncated days and every day's count matching the API's reported total. It inserted 371,376 new complaints and updated 27,534 that had changed since the last load, bringing the warehouse to 1,130,506. `dbt build` then passed all 56 nodes in 30 s. Rerunning an already-loaded day fetched 28,450 records and changed nothing.
+
+Code lives in `src/cfpb_platform/orchestration/`:
+
+- **`assets.py`**: `raw/complaints` wraps `run_ingest`, and `@dbt_assets` turns every dbt seed and model into a Dagster asset.
+- **`resources.py`**: the DuckDB warehouse and the CFPB API client, as swappable resources.
+- **`definitions.py`**: the `daily_refresh` job, its schedule, and the resource wiring.
+
+### Running it
+
+```bash
+dagster dev                                       # from the repo root
+```
+
+- **Materialize all** in the asset graph, or launch `daily_refresh` from Jobs, runs ingestion then `dbt build`.
+- **Backfills:** to load a specific window, launch `raw/complaints` with run config `{"ops": {"raw__complaints": {"config": {"start": "2026-10-01", "end": "2026-10-07"}}}}`.
+- The schedule ships **stopped**. Turn it on under Automation when you want daily runs.
+  It only fires while a Dagster daemon is running (`dagster dev` starts one).
+
+### Design decisions
+
+1. **Ingestion and dbt are one lineage graph.** The ingestion asset's key is `raw/complaints`, the same key dagster-dbt gives the dbt source `raw.complaints`, so every complaint-derived model is drawn downstream of the API pull. A failed ingestion stops dbt from running on stale data.
+2. **dbt tests are asset checks.** `dbt build` runs inside Dagster, so each model's tests run right after it builds, and error-severity failures stop downstream models. Results show on each asset's page.
+3. **Two layers of retries.** The HTTP client retries single requests with backoff. On top of that, a Dagster `RetryPolicy` (3 tries, exponential from 60 s) reruns the whole ingestion step, for example if the API is down for several minutes. That's safe because loads are idempotent and a failed run never advances the watermark.
+4. **One warehouse path for both tools.** The ingestion code resolves `CFPB_DB_PATH` from the current directory, while dbt's profile resolves it from `transform/`. The Dagster definitions resolve it once to an absolute path and pass it to both, so they always write the same file.
+5. **Ingestion logs show up in the run.** The per-day lines from `run_ingest` (`2026-11-10: fetched=28450 inserted=0 updated=0`) are forwarded to Dagster's run log, so progress is visible in the UI during a long backfill.
+6. **DuckDB's single-writer lock is respected.** The ingestion asset closes its connection before the dbt step starts, so the dbt subprocess can open the file.
+7. **Tested offline.** `tests/test_orchestration.py` runs the real `daily_refresh` assets end to end against a fake API and a temporary warehouse: ingestion, all 9 models, and all dbt tests. It also checks that a rerun inserts nothing.
+8. **Dependency pins.** dbt-core 1.11 needs protobuf 6, but the newest `grpcio-health-checking` (a Dagster dependency) needs protobuf 7. `pyproject.toml` pins `protobuf<7` and `grpcio-health-checking<1.76` so both import cleanly.
