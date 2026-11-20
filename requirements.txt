@@ -2,3 +2,8 @@ requests>=2.31
 duckdb>=1.1
 dbt-duckdb>=1.9
 pytest>=8.0
+dagster>=1.13,<1.14
+dagster-webserver>=1.13,<1.14
+dagster-dbt>=0.29,<0.30
+protobuf>=6,<7
+grpcio-health-checking<1.76

@@ -13,3 +13,5 @@ logs/
 .DS_Store
 *.zip
 transform/.user.yml
+.tmp_dagster_home_*/
+.dagster/
