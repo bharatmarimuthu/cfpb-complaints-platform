@@ -30,3 +30,6 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 
+[tool.dagster]
+module_name = "cfpb_platform.orchestration.definitions"
+code_location_name = "cfpb"
