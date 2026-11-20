@@ -154,8 +154,22 @@ dagster dev                                       # from the repo root
 
 - **Materialize all** in the asset graph, or launch `daily_refresh` from Jobs, runs ingestion then `dbt build`.
 - **Backfills:** to load a specific window, launch `raw/complaints` with run config `{"ops": {"raw__complaints": {"config": {"start": "2026-10-01", "end": "2026-10-07"}}}}`.
-- The schedule ships **stopped**. Turn it on under Automation when you want daily runs.
-  It only fires while a Dagster daemon is running (`dagster dev` starts one).
+- The schedule ships **stopped**, so a plain `dagster dev` never calls the API on its own.
+
+### Running it daily (macOS)
+
+The schedule fires only while a Dagster daemon is running. `scripts/dagster_daemon.sh` runs one as a LaunchAgent, which starts at login and is restarted if it dies, and turns the schedule on:
+
+```bash
+conda activate cfpb
+scripts/dagster_daemon.sh install      # load the agent and start daily_refresh_schedule
+scripts/dagster_daemon.sh status       # agent state, schedule state, last log lines
+scripts/dagster_daemon.sh uninstall    # stop the schedule and remove the agent
+```
+
+- With the agent installed, open the UI with `DAGSTER_HOME=$PWD/.dagster dagster-webserver` rather than `dagster dev`, which would start a second daemon.
+- The daemon log is `logs/dagster-daemon.log`.
+- If the Mac is asleep at 06:00 ET, the tick fires on wake. Nothing is lost, because each run loads from the watermark up to yesterday.
 
 ### Design decisions
 
@@ -167,3 +181,4 @@ dagster dev                                       # from the repo root
 6. **DuckDB's single-writer lock is respected.** The ingestion asset closes its connection before the dbt step starts, so the dbt subprocess can open the file.
 7. **Tested offline.** `tests/test_orchestration.py` runs the real `daily_refresh` assets end to end against a fake API and a temporary warehouse: ingestion, all 9 models, and all dbt tests. It also checks that a rerun inserts nothing.
 8. **Dependency pins.** dbt-core 1.11 needs protobuf 6, but the newest `grpcio-health-checking` (a Dagster dependency) needs protobuf 7. `pyproject.toml` pins `protobuf<7` and `grpcio-health-checking<1.76` so both import cleanly.
+9. **The daemon runs as a service, not inside `dagster dev`.** A schedule is only as reliable as the process that ticks it. A LaunchAgent keeps the daemon up across logins and crashes without needing a terminal open. The schedule's on/off state lives in the Dagster instance (`.dagster/`), not in code, so the tests and a fresh checkout still start with it off.
