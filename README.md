@@ -158,17 +158,19 @@ dagster dev                                       # from the repo root
 
 ### Running it daily (macOS)
 
-The schedule fires only while a Dagster daemon is running. `scripts/dagster_daemon.sh` runs one as a LaunchAgent, which starts at login and is restarted if it dies, and turns the schedule on:
+The schedule fires only while a Dagster daemon is running. `scripts/dagster_daemon.sh` installs two LaunchAgents, which start at login and are restarted if they die: a persistent code server on `127.0.0.1:4266`, and the daemon, which reads `dagster_workspace.yaml` to find it. `install` also turns the schedule on:
 
 ```bash
 conda activate cfpb
-scripts/dagster_daemon.sh install      # load the agent and start daily_refresh_schedule
-scripts/dagster_daemon.sh status       # agent state, schedule state, last log lines
-scripts/dagster_daemon.sh uninstall    # stop the schedule and remove the agent
+scripts/dagster_daemon.sh install      # load both agents and start daily_refresh_schedule
+scripts/dagster_daemon.sh status       # agent states, schedule state, last log lines
+scripts/dagster_daemon.sh reload       # restart the code server after changing pipeline code
+scripts/dagster_daemon.sh uninstall    # stop the schedule and remove both agents
 ```
 
-- With the agent installed, open the UI with `DAGSTER_HOME=$PWD/.dagster dagster-webserver` rather than `dagster dev`, which would start a second daemon.
-- The daemon log is `logs/dagster-daemon.log`.
+- With the agents installed, open the UI with `DAGSTER_HOME=$PWD/.dagster dagster-webserver -w dagster_workspace.yaml` rather than `dagster dev`, which would start a second daemon.
+- The code server loads the code once, so run `reload` after editing anything under `src/` or `transform/`.
+- Logs are `logs/dagster-daemon.log` and `logs/dagster-code-server.log`.
 - If the Mac is asleep at 06:00 ET, the tick fires on wake. Nothing is lost, because each run loads from the watermark up to yesterday.
 
 ### Design decisions
@@ -182,3 +184,4 @@ scripts/dagster_daemon.sh uninstall    # stop the schedule and remove the agent
 7. **Tested offline.** `tests/test_orchestration.py` runs the real `daily_refresh` assets end to end against a fake API and a temporary warehouse: ingestion, all 9 models, and all dbt tests. It also checks that a rerun inserts nothing.
 8. **Dependency pins.** dbt-core 1.11 needs protobuf 6, but the newest `grpcio-health-checking` (a Dagster dependency) needs protobuf 7. `pyproject.toml` pins `protobuf<7` and `grpcio-health-checking<1.76` so both import cleanly.
 9. **The daemon runs as a service, not inside `dagster dev`.** A schedule is only as reliable as the process that ticks it. A LaunchAgent keeps the daemon up across logins and crashes without needing a terminal open. The schedule's on/off state lives in the Dagster instance (`.dagster/`), not in code, so the tests and a fresh checkout still start with it off.
+10. **One long-running code server instead of one per minute.** By default the daemon starts a fresh gRPC code server every 60 seconds and lets the old one time out. On a laptop that fails during macOS Power Nap: the Mac wakes for a few seconds, the daemon starts a server, and the Mac sleeps again before the server is up. Each of the 10 `DagsterUserCodeUnreachableError` bursts in the daemon log lined up to the second with a `DarkWake` in `pmset -g log`. A separate code-server agent that stays up removes that race and the ~1,400 shutdown warnings it caused, at the cost of a `reload` step after code changes.

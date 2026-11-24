@@ -1,0 +1,9 @@
+# Workspace for the long-running services installed by scripts/dagster_daemon.sh.
+# The daemon and webserver connect to one persistent code server instead of
+# spawning their own every 60 seconds. `dagster dev` and the tests don't use
+# this file; they load the code from [tool.dagster] in pyproject.toml.
+load_from:
+  - grpc_server:
+      host: 127.0.0.1
+      port: 4266
+      location_name: cfpb
