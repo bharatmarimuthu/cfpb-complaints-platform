@@ -9,6 +9,12 @@
 # own every 60 seconds. A freshly spawned server can lose the race against
 # macOS Power Nap, when the Mac goes back to sleep before the server is up.
 #
+# The code server is a single `dagster api grpc` process, not
+# `dagster code-server start`. The latter is a proxy whose child gRPC server
+# exits after 30 s without a heartbeat. A wake from hibernate trips that
+# timeout, and the proxy never respawns the child. `api grpc` has no heartbeat
+# unless --heartbeat is passed, and if it ever exits, launchd restarts it.
+#
 #   scripts/dagster_daemon.sh install     # write both plists, load them, start the schedule
 #   scripts/dagster_daemon.sh uninstall   # stop the schedule, unload and delete both plists
 #   scripts/dagster_daemon.sh reload      # restart the code server to pick up code changes
@@ -114,7 +120,7 @@ case "${1:-}" in
     unload "$DAEMON_LABEL"
     unload "$CODE_LABEL"
     write_plist "$CODE_LABEL" "$CODE_LOG" \
-      "$BIN/dagster" code-server start \
+      "$BIN/dagster" api grpc \
       -h "$CODE_HOST" -p "$CODE_PORT" \
       -m cfpb_platform.orchestration.definitions --location-name cfpb \
       --log-level warning
