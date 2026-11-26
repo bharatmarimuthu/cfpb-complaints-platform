@@ -1,0 +1,78 @@
+# Runs fully offline: no job calls the CFPB API. The tests use a fake API, and
+# the dbt job builds the warehouse from synthetic complaints.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: pytest (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12"]   # oldest supported, and the version used locally
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Validate Dagster definitions
+        run: dagster definitions validate
+      - name: Run tests
+        run: pytest -q
+
+  dbt:
+    name: dbt build on synthetic data
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # One absolute path, so the loader (relative to the repo root) and dbt
+      # (relative to transform/) use the same file.
+      CFPB_DB_PATH: ${{ github.workspace }}/data/ci.duckdb
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Load synthetic complaints
+        run: python -m cfpb_platform.sample_data --rows 5000
+      - name: dbt build (full)
+        working-directory: transform
+        run: dbt build
+      # Same complaint IDs with new content, so every row changes and the
+      # incremental fact model has to replace them.
+      - name: Reload the same complaints with changed content
+        run: python -m cfpb_platform.sample_data --rows 5000 --seed 7 --start 2026-11-01 --end 2026-11-15
+      - name: dbt build (incremental)
+        working-directory: transform
+        run: dbt build
+      - name: Upload dbt artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-target
+          path: |
+            transform/target/run_results.json
+            transform/target/manifest.json
+          retention-days: 7
