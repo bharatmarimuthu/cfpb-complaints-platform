@@ -1,7 +1,8 @@
 """Dagster entry point. `dagster dev` (run from the repo root) loads `defs` from here.
 
 One job, `daily_refresh`, materializes everything: ingestion first, then the
-dbt seed and models in dependency order. A schedule runs it every morning.
+blocking quality checks on the raw load, then the dbt seed and models in
+dependency order. A schedule runs it every morning.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from dagster import (
 from dagster_dbt import DbtCliResource
 
 from .assets import cfpb_dbt_assets, dbt_project, raw_complaints
+from .checks import raw_complaints_checks
 from .resources import CFPBApi, DuckDBWarehouse, dbt_executable, resolve_db_path
 
 DB_PATH = resolve_db_path()
@@ -41,6 +43,7 @@ daily_refresh_schedule = ScheduleDefinition(
 
 defs = Definitions(
     assets=[raw_complaints, cfpb_dbt_assets],
+    asset_checks=[raw_complaints_checks],
     jobs=[daily_refresh],
     schedules=[daily_refresh_schedule],
     resources={

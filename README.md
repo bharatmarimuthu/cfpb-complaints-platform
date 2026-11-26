@@ -11,7 +11,7 @@ An end-to-end data platform built on the [CFPB Consumer Complaint Database](http
 | 1 | Incremental, idempotent ingestion from the CFPB API into a raw layer | ✅ |
 | 2 | dbt models: staging → star schema, with data tests | ✅ |
 | 3 | Dagster orchestration: schedules, retries, lineage | ✅ |
-| 4 | Data quality gates that block bad loads | ⬜ |
+| 4 | Data quality gates that block bad loads | ✅ |
 | 5 | CI/CD with GitHub Actions | ⬜ |
 | 6 | LLM narrative classification + PII flagging, evaluated against labeled data | ⬜ |
 | 7 | Complaint-volume anomaly detection | ⬜ |
@@ -185,3 +185,30 @@ scripts/dagster_daemon.sh uninstall    # stop the schedule and remove both agent
 8. **Dependency pins.** dbt-core 1.11 needs protobuf 6, but the newest `grpcio-health-checking` (a Dagster dependency) needs protobuf 7. `pyproject.toml` pins `protobuf<7` and `grpcio-health-checking<1.76` so both import cleanly.
 9. **The daemon runs as a service, not inside `dagster dev`.** A schedule is only as reliable as the process that ticks it. A LaunchAgent keeps the daemon up across logins and crashes without needing a terminal open. The schedule's on/off state lives in the Dagster instance (`.dagster/`), not in code, so the tests and a fresh checkout still start with it off.
 10. **One long-running code server instead of one per minute.** By default the daemon starts a fresh gRPC code server every 60 seconds and lets the old one time out. On a laptop that fails during macOS Power Nap: the Mac wakes for a few seconds, the daemon starts a server, and the Mac sleeps again before the server is up. Each of the 10 `DagsterUserCodeUnreachableError` bursts in the daemon log lined up to the second with a `DarkWake` in `pmset -g log`. A separate code-server agent that stays up removes that race and the ~1,400 shutdown warnings it caused, at the cost of a `reload` step after code changes. The server is a plain `dagster api grpc` process rather than `dagster code-server start`. The latter is a proxy that runs the real server as a child, and that child exits after 30 s without a heartbeat. The first wake from hibernate tripped this: the child shut down one second after the wake, the proxy kept running without respawning it, and the 03:00 run was skipped. `api grpc` has no heartbeat by default. If it does exit, launchd's KeepAlive restarts it, which took 3 s when tested with `kill -9`. The scheduler then runs any tick it missed.
+
+## Phase 4: Data quality gates
+
+```
+raw/complaints ──▶ [no_truncated_days ✋] [days_match_reported_totals ✋] [fresh ⚠] ──▶ dbt build
+                    ✋ blocking: on failure, every dbt model in the run is skipped
+                    ⚠ warning only
+```
+
+Three Dagster asset checks on `raw/complaints` run after every load and before dbt. They live in `src/cfpb_platform/orchestration/checks.py`.
+
+| Check | Fails when | Effect |
+|---|---|---|
+| `no_truncated_days` | a day in this load hit `max_records_per_day` and stopped early | blocks dbt |
+| `days_match_reported_totals` | a day's fetched count differs from the API's reported total | blocks dbt |
+| `fresh` | the newest `date_received` is more than 3 days old | warning |
+
+**First real run (2026-11-25):** the load re-fetched 15 days in 167 s, and all three checks passed in under a second (0 truncated days, 15 of 15 days matching, newest complaint 1 day old). `dbt build` then ran in 53 s.
+
+### Design decisions
+
+1. **The gate sits between the raw load and the marts, not inside ingestion.** Ingestion still writes the raw rows, so nothing fetched is lost, and the next run's lookback re-pulls the bad days anyway. Only the models are held back. A failed check skips every dbt model, so the marts keep the last good build instead of mixing partial days into monthly totals.
+2. **The checks read what the load recorded, not the API.** Each day's fetched count, reported total, and truncation flag are already in `meta.ingest_day_log`. The check finds this load's rows through the `run_id` stored in the latest `raw/complaints` materialization, so it costs one query and no API calls.
+3. **Count mismatches used to be a log line.** The client already noticed when a day's records differed from the reported total, but it only warned. Now the run stops on it, and the mismatched days and both counts appear in the check's metadata.
+4. **Freshness warns instead of blocking.** Stale data is still correct data, and blocking dbt would leave the marts just as stale. The 3-day limit covers CFPB's usual 1-day publishing lag plus a weekend. Over the first 8 runs the lag was 0 to 1 days.
+5. **Thresholds are set from real loads.** Across all 162 loaded days, no day was truncated and none had a count mismatch, so requiring exact equality doesn't produce false failures.
+6. **The tests prove the gate actually blocks.** `tests/test_orchestration.py` runs the full pipeline three more ways: with a low per-day cap (truncated days), with a fake API that over-reports one day by 1, and with 6-day-old data. The first two must fail with the raw rows written and no `marts` schema created. The stale run must still build everything. With `blocking=False`, both blocking tests fail.
