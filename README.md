@@ -1,5 +1,7 @@
 # CFPB Consumer Complaints Data Platform
 
+[![CI](https://github.com/bharatmarimuthu/cfpb-complaints-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/bharatmarimuthu/cfpb-complaints-platform/actions/workflows/ci.yml)
+
 An end-to-end data platform built on the [CFPB Consumer Complaint Database](https://www.consumerfinance.gov/data-research/consumer-complaints/), a public dataset of complaints about U.S. banks and financial companies. It is updated daily and has both structured fields and free-text narratives.
 
 **Stack:** Python · DuckDB · dbt · Dagster · GitHub Actions · (LLM enrichment, Streamlit dashboard, coming in later phases)
@@ -12,7 +14,7 @@ An end-to-end data platform built on the [CFPB Consumer Complaint Database](http
 | 2 | dbt models: staging → star schema, with data tests | ✅ |
 | 3 | Dagster orchestration: schedules, retries, lineage | ✅ |
 | 4 | Data quality gates that block bad loads | ✅ |
-| 5 | CI/CD with GitHub Actions | ⬜ |
+| 5 | CI/CD with GitHub Actions | ✅ |
 | 6 | LLM narrative classification + PII flagging, evaluated against labeled data | ⬜ |
 | 7 | Complaint-volume anomaly detection | ⬜ |
 | 8 | Dashboard (pipeline health + complaint trends) | ⬜ |
@@ -24,7 +26,7 @@ python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
 
-pytest                              # 22 offline tests (incl. an end-to-end Dagster run)
+pytest                              # 27 offline tests (incl. end-to-end Dagster runs)
 
 # Load one week to try it out
 python -m cfpb_platform.ingest --start 2026-10-01 --end 2026-10-07
@@ -212,3 +214,20 @@ Three Dagster asset checks on `raw/complaints` run after every load and before d
 4. **Freshness warns instead of blocking.** Stale data is still correct data, and blocking dbt would leave the marts just as stale. The 3-day limit covers CFPB's usual 1-day publishing lag plus a weekend. In the six daily runs from 11-20 to 11-25 the lag was 0 to 1 days.
 5. **Thresholds are set from real loads.** Across all 162 loaded days, no day was truncated and none had a count mismatch, so requiring exact equality doesn't produce false failures.
 6. **The tests prove the gate actually blocks.** `tests/test_orchestration.py` runs the full pipeline three more ways: with a low per-day cap (truncated days), with a fake API that over-reports one day by 1, and with 6-day-old data. The first two must fail with the raw rows written and no `marts` schema created. The stale run must still build everything. With `blocking=False`, both blocking tests fail.
+
+## Phase 5: CI (GitHub Actions)
+
+`.github/workflows/ci.yml` runs on every push to `main` and on every pull request. No job touches the network beyond installing packages.
+
+| Job | Steps |
+|---|---|
+| `pytest (Python 3.10, 3.12)` | `dagster definitions validate`, then all 27 tests, including the Dagster end-to-end and quality-gate runs against the fake API |
+| `dbt build on synthetic data` | load 5,000 synthetic complaints → `dbt build` → reload the same IDs with changed content → `dbt build` again |
+
+### Design decisions
+
+1. **Offline by design.** The CFPB API is slow (a day of data can take minutes) and isn't reachable from every network, and CI shouldn't depend on a third party being up. The tests use a fake API that mimics the real paging, and the dbt job uses `cfpb_platform.sample_data`, which produces the same kinds of mess the real data has.
+2. **Two dbt builds.** The first builds every table from scratch. The second runs after every complaint has changed, so `fct_complaints` takes its incremental delete+insert path. A bug there would otherwise show up only on the live warehouse.
+3. **Python 3.10 and 3.12.** `pyproject.toml` claims `>=3.10`, so CI tests the oldest supported version alongside the one used locally.
+4. **Definitions are validated separately.** `dagster definitions validate` loads the code location the way the daemon does, so an import or wiring error fails with a clear message instead of as a test error.
+5. **Fresh clone, fresh manifest.** CI has no `transform/target/`, so the asset module has to build the dbt manifest itself. That's the path a new contributor takes.
