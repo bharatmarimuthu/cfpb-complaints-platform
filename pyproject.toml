@@ -17,6 +17,9 @@ dev = [
     # dependency) needs protobuf 7. These pins keep both importable.
     "protobuf>=6,<7",
     "grpcio-health-checking<1.76",
+    # Phase 6: narrative classifier (Claude) and its TF-IDF baseline.
+    "anthropic>=2.14,<3",
+    "scikit-learn>=1.5",
 ]
 
 [build-system]

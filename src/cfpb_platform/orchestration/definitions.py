@@ -19,6 +19,15 @@ from dagster_dbt import DbtCliResource
 
 from .assets import cfpb_dbt_assets, dbt_project, raw_complaints
 from .checks import raw_complaints_checks
+from .narrative_assets import (
+    GROUP as NARRATIVES_GROUP,
+    NarrativeLLM,
+    archive_narratives,
+    narrative_baseline_predictions,
+    narrative_eval,
+    narrative_llm_predictions,
+    narrative_split,
+)
 from .resources import CFPBApi, DuckDBWarehouse, dbt_executable, resolve_db_path
 
 DB_PATH = resolve_db_path()
@@ -29,8 +38,16 @@ os.environ["CFPB_DB_PATH"] = DB_PATH
 
 daily_refresh = define_asset_job(
     name="daily_refresh",
-    selection=AssetSelection.all(),
+    # The narratives assets work on a fixed archive and the LLM step costs
+    # money, so they're left out of the daily run.
+    selection=AssetSelection.all() - AssetSelection.groups(NARRATIVES_GROUP),
     description="Pull new and updated complaints, then rebuild and test the dbt models.",
+)
+
+narrative_eval_job = define_asset_job(
+    name="narrative_eval",
+    selection=AssetSelection.groups(NARRATIVES_GROUP),
+    description="Load the narratives archive, classify the test split (baseline + Claude), and score both. Manual only.",
 )
 
 daily_refresh_schedule = ScheduleDefinition(
@@ -42,13 +59,15 @@ daily_refresh_schedule = ScheduleDefinition(
 )
 
 defs = Definitions(
-    assets=[raw_complaints, cfpb_dbt_assets],
+    assets=[raw_complaints, cfpb_dbt_assets, archive_narratives, narrative_split,
+            narrative_baseline_predictions, narrative_llm_predictions, narrative_eval],
     asset_checks=[raw_complaints_checks],
-    jobs=[daily_refresh],
+    jobs=[daily_refresh, narrative_eval_job],
     schedules=[daily_refresh_schedule],
     resources={
         "warehouse": DuckDBWarehouse(db_path=DB_PATH),
         "cfpb_api": CFPBApi(),
+        "narrative_llm": NarrativeLLM(),
         "dbt": DbtCliResource(project_dir=dbt_project, dbt_executable=dbt_executable()),
     },
 )
