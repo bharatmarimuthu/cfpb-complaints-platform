@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/bharatmarimuthu/cfpb-complaints-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/bharatmarimuthu/cfpb-complaints-platform/actions/workflows/ci.yml)
 
-An end-to-end data platform built on the [CFPB Consumer Complaint Database](https://www.consumerfinance.gov/data-research/consumer-complaints/), a public dataset of complaints about U.S. banks and financial companies. It is updated daily and has both structured fields and free-text narratives.
+An end-to-end data platform built on the [CFPB Consumer Complaint Database](https://www.consumerfinance.gov/data-research/consumer-complaints/), a public dataset of complaints about U.S. banks and financial companies. The structured fields are updated daily. Free-text consumer narratives stopped being published on 2026-08-14; Phase 6 uses CFPB's archived copies of them.
 
-**Stack:** Python · DuckDB · dbt · Dagster · GitHub Actions · (LLM enrichment, Streamlit dashboard, coming in later phases)
+**Stack:** Python · DuckDB · dbt · Dagster · GitHub Actions · Claude API + scikit-learn · (Streamlit dashboard coming in a later phase)
 
 ## Roadmap
 
@@ -15,7 +15,7 @@ An end-to-end data platform built on the [CFPB Consumer Complaint Database](http
 | 3 | Dagster orchestration: schedules, retries, lineage | ✅ |
 | 4 | Data quality gates that block bad loads | ✅ |
 | 5 | CI/CD with GitHub Actions | ✅ |
-| 6 | LLM narrative classification + PII flagging, evaluated against labeled data | ⬜ |
+| 6 | LLM narrative classification + PII flagging, evaluated against labeled data | 🟡 baseline scored; Claude run pending |
 | 7 | Complaint-volume anomaly detection | ⬜ |
 | 8 | Dashboard (pipeline health + complaint trends) | ⬜ |
 
@@ -26,7 +26,7 @@ python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
 
-pytest                              # 27 offline tests (incl. end-to-end Dagster runs)
+pytest                              # 38 offline tests (incl. end-to-end Dagster runs)
 
 # Load one week to try it out
 python -m cfpb_platform.ingest --start 2026-10-01 --end 2026-10-07
@@ -110,7 +110,7 @@ erDiagram
 3. **No NULL foreign keys.** Unrecognized or missing state codes map to an `UNK` member in the dimension, so joins never silently drop complaints.
 4. **Incremental fact table.** After the first build, `fct_complaints` reprocesses only complaints whose raw record changed (`last_updated_at` > what's already loaded), using delete+insert on `complaint_id`.
 5. **Enforced data contract.** `fct_complaints` declares every column's name and type. If an upstream change alters the shape, the build fails instead of quietly breaking dashboards.
-6. **Narratives kept separate.** Free text can contain personal information that CFPB's scrubbing missed, so it lives in `complaint_narratives`, which can be access-restricted while the fact table stays broadly usable. Tagged in dbt metadata (`contains_pii`, `access_tier`).
+6. **Narratives kept separate.** Free text can contain personal information that CFPB's scrubbing missed, so it lives in `complaint_narratives`, which can be access-restricted while the fact table stays broadly usable. Tagged in dbt metadata (`contains_pii`, `access_tier`). (Since CFPB stopped publishing narratives on 2026-08-14 this table is empty on live data; Phase 6 works from the archive instead.)
 7. **Tests are tiered by severity.**
    - **Error (blocks the build):** primary keys unique and not null, every foreign key resolves, no future dates, and a reconciliation test that raw and fact row counts match.
    - **Warn (alerts but doesn't block):** values CFPB might legitimately add later, such as a new `company_response` category or an unrecognized state code.
@@ -221,7 +221,7 @@ Three Dagster asset checks on `raw/complaints` run after every load and before d
 
 | Job | Steps |
 |---|---|
-| `pytest (Python 3.10, 3.12)` | `dagster definitions validate`, then all 27 tests, including the Dagster end-to-end and quality-gate runs against the fake API |
+| `pytest (Python 3.10, 3.12)` | `dagster definitions validate`, then all 38 tests, including the Dagster end-to-end and quality-gate runs against the fake API |
 | `dbt build on synthetic data` | load 5,000 synthetic complaints → `dbt build` → reload the same IDs with changed content → `dbt build` again |
 
 ### Design decisions
@@ -231,3 +231,55 @@ Three Dagster asset checks on `raw/complaints` run after every load and before d
 3. **Python 3.10 and 3.12.** `pyproject.toml` claims `>=3.10`, so CI tests the oldest supported version alongside the one used locally.
 4. **Definitions are validated separately.** `dagster definitions validate` loads the code location the way the daemon does, so an import or wiring error fails with a clear message instead of as a test error.
 5. **Fresh clone, fresh manifest.** CI has no `transform/target/`, so the asset module has to build the dbt manifest itself. That's the path a new contributor takes.
+
+## Phase 6: Narrative classification (Claude) with a baseline
+
+The question: given only the consumer's own words, can a model pick the **product** and **issue** the consumer chose on the CFPB form, and spot personal information the CFPB's `XXXX` scrubbing missed? CFPB's labels are the ground truth.
+
+**Data.** CFPB stopped publishing complaint narratives on 2026-08-14; the live API, CSV export and bulk file no longer have the field. Narratives published before then are in CFPB's [narratives archive](https://www.consumerfinance.gov/foia-requests/foia-electronic-reading-room/cfpb-consumer-complaint-database-narratives-archive/) (FOIA Reading Room), as monthly zip files. This phase uses the July 2026 export: 672,036 complaints, 10,002 with a narrative, 11 products, 118 product/issue pairs. Put the zip files in `data/archive/` (gitignored); more months can be added the same way.
+
+```
+archive/narratives -> ml/narrative_split -> ml/narrative_baseline_predictions -> ml/narrative_eval
+                                         -> ml/narrative_llm_predictions      ->
+```
+
+| Asset | What it does |
+|---|---|
+| `archive/narratives` | Loads every zip in `data/archive/`, keeping rows with a narrative |
+| `ml/narrative_split` | Seeded train/test split, stratified by product (999 test, 9,003 train) |
+| `ml/narrative_baseline_predictions` | TF-IDF + logistic regression trained on the train split |
+| `ml/narrative_llm_predictions` | Claude labels each test narrative: product, issue, leftover PII types |
+| `ml/narrative_eval` | Accuracy, macro-F1, per-class F1 and a product confusion matrix per classifier (`ml.narrative_eval`, `ml.narrative_confusion`) |
+
+### Results (test split, 999 narratives)
+
+| Classifier | Product accuracy | Product macro-F1 | Issue accuracy | Issue macro-F1 | Cost |
+|---|---|---|---|---|---|
+| TF-IDF + logistic regression | 0.799 | 0.667 | 0.499 | 0.232 | $0 |
+| Claude Opus 5.5 (effort `low`) | pending | | | | |
+
+Issue is scored as the (product, issue) pair, since CFPB reuses issue names across products.
+
+### Running it
+
+The `narrative_eval` job runs all five assets. It's manual only and not part of `daily_refresh`.
+
+```bash
+export ANTHROPIC_API_KEY=...        # only the Claude step needs it
+dagster job execute -m cfpb_platform.orchestration.definitions -j narrative_eval
+```
+
+To try the Claude step cheaply first, launch `ml/narrative_llm_predictions` from the UI with config `{"limit": 20}`. The model, effort, cost cap and parallelism are settings on the `narrative_llm` resource (default: `claude-opus-5-5`, `low`, $10, 8 workers).
+
+### Design decisions
+
+1. **A fixed test split, stratified by product.** A seeded hash of the complaint ID picks the test rows, so reruns and other models are scored on the same 999 narratives. Small products still get at least one test row.
+2. **A baseline first.** A TF-IDF + logistic regression model trained on the other 9,003 narratives sets the bar. An LLM that can't beat a free model trained on the same data isn't worth its cost.
+3. **Structured output with the label list as an enum.** Claude's answer is restricted to CFPB's own products, issues and a fixed set of PII types, so every answer parses and no answer invents a label. Calls that fail (refusal, API error) count as wrong rather than being dropped, so a classifier can't raise its score by skipping hard cases.
+4. **The label list sits in a cached system prompt.** The instructions and all 118 labels are identical on every call and marked for prompt caching, so each call pays full price only for the narrative.
+5. **A hard cost cap and resumable runs.** Predictions are saved after every wave of parallel calls, keyed by complaint, model and a hash of the prompt. A run stops before it would pass the cap, and the next run continues where it stopped. Changing the prompt or label set changes the hash, so old and new predictions are never mixed.
+6. **No database lock during API calls.** DuckDB allows one writer. The Claude step reads its inputs, closes the file, and reopens it only briefly to save each wave, so a long run doesn't block the daily ingestion.
+7. **Refusals are handled, not hidden.** On Opus the request opts into Anthropic's server-side fallback, so a safety refusal is retried on another model. The model that actually answered is recorded and priced.
+8. **PII flags have no ground truth.** CFPB doesn't label leftover personal information, so the eval reports how often flags fire and by type; flagged narratives get a manual spot check.
+9. **Offline tests.** The tests and CI use a keyword classifier in place of Claude, and a fake client to check the exact request (cached system prompt, enum schema, fallback) and response handling (parsing, refusals, pricing). No test calls the API.
+10. **The archive may be a sample.** July 2026 has exactly 10,002 narratives (1.5% of complaints), and credit reporting, the largest product overall, has only 463 of them. Results describe this archive, not all complaints.
